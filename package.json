@@ -1,0 +1,29 @@
+{
+  "name": "agentic-web-foundation",
+  "version": "1.0.0",
+  "description": "AWS tools to create agentic web foundation network",
+  "homepage": "https://github.com/agentic-profile/agentic-web-foundation#readme",
+  "bugs": {
+    "url": "https://github.com/agentic-profile/agentic-web-foundation/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agentic-profile/agentic-web-foundation.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "foundation:up":      "aws cloudformation deploy --template-file foundation.yaml --stack-name foundation-staging --parameter-overrides Environment=staging KeyPairName=aws-us-west-2-local --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM",
+    "foundation:up:prod": "aws cloudformation deploy --template-file foundation.yaml --stack-name foundation-prod --parameter-overrides Environment=prod KeyPairName=aws-us-west-2-local --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM",
+    "foundation:down":      "aws cloudformation delete-stack --stack-name foundation-staging",
+    "foundation:down:prod": "aws cloudformation delete-stack --stack-name foundation-prod",
+    
+    "foundation:status":      "aws cloudformation describe-stacks --stack-name foundation-staging --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo 'STACK_DELETED'",
+    "foundation:status:prod": "aws cloudformation describe-stacks --stack-name foundation-prod --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo 'STACK_DELETED'",
+    "foundation:events":      "aws cloudformation describe-stack-events --stack-name foundation-staging --query 'StackEvents[0:5]' --output table",
+    "foundation:events:prod": "aws cloudformation describe-stack-events --stack-name foundation-prod --query 'StackEvents[0:5]' --output table"
+  }
+}
