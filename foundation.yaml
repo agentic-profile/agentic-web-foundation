@@ -194,7 +194,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Security group for Valkey serverless cache
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 6379
@@ -207,8 +207,8 @@ Resources:
           CidrIpv6: ::/0
           Description: Allow Redis/Valkey access from anywhere (IPv6)
 
-  # Default VPC
-  DefaultVpc:
+  # Foundation VPC
+  FoundationVpc:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: 10.0.0.0/16
@@ -232,14 +232,14 @@ Resources:
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       InternetGatewayId: !Ref InternetGateway
 
   # Route Table
   RouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       Tags:
         - Key: Name
           Value: !Sub 'agentic-foundation-rt-${Environment}'
@@ -254,10 +254,10 @@ Resources:
       GatewayId: !Ref InternetGateway
 
   # Subnet 1
-  DefaultSubnet1:
+  PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       CidrBlock: 10.0.1.0/24
       AvailabilityZone: !Select [0, !GetAZs '']
       MapPublicIpOnLaunch: true
@@ -266,10 +266,10 @@ Resources:
           Value: !Sub 'agentic-foundation-subnet-1-${Environment}'
 
   # Subnet 2
-  DefaultSubnet2:
+  PublicSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       CidrBlock: 10.0.2.0/24
       AvailabilityZone: !Select [1, !GetAZs '']
       MapPublicIpOnLaunch: true
@@ -281,21 +281,21 @@ Resources:
   Subnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      SubnetId: !Ref DefaultSubnet1
+      SubnetId: !Ref PublicSubnet1
       RouteTableId: !Ref RouteTable
 
   # Associate Subnet 2 with Route Table
   Subnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      SubnetId: !Ref DefaultSubnet2
+      SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref RouteTable
 
   # Private Subnet 1 for Lambda functions
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       CidrBlock: 10.0.3.0/24
       AvailabilityZone: !Select [0, !GetAZs '']
       MapPublicIpOnLaunch: false
@@ -307,7 +307,7 @@ Resources:
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       CidrBlock: 10.0.4.0/24
       AvailabilityZone: !Select [1, !GetAZs '']
       MapPublicIpOnLaunch: false
@@ -337,7 +337,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Security group for NAT instance
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -369,7 +369,7 @@ Resources:
       ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64}}'
       InstanceType: t4g.nano
       KeyName: !Ref KeyPairName
-      SubnetId: !Ref DefaultSubnet1
+      SubnetId: !Ref PublicSubnet1
       SecurityGroupIds:
         - !Ref NatInstanceSecurityGroup
       SourceDestCheck: false
@@ -592,7 +592,7 @@ Resources:
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       Tags:
         - Key: Name
           Value: !Sub 'agentic-foundation-private-rt-${Environment}'
@@ -624,7 +624,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Security group for VPC endpoints
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 443
@@ -640,7 +640,7 @@ Resources:
   SecretsManagerVpcEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
       VpcEndpointType: Interface
       SubnetIds:
@@ -654,7 +654,7 @@ Resources:
   LambdaVpcEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.lambda'
       VpcEndpointType: Interface
       SubnetIds:
@@ -668,7 +668,7 @@ Resources:
   CloudWatchLogsVpcEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
       VpcEndpointType: Interface
       SubnetIds:
@@ -682,7 +682,7 @@ Resources:
   S3VpcEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
-      VpcId: !Ref DefaultVpc
+      VpcId: !Ref FoundationVpc
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
       VpcEndpointType: Gateway
       RouteTableIds:
@@ -731,23 +731,23 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-ValkeyUserGroupId'
 
-  DefaultVpc:
-    Description: 'Default VPC ID'
-    Value: !Ref DefaultVpc
+  FoundationVpc:
+    Description: 'Foundation VPC ID'
+    Value: !Ref FoundationVpc
     Export:
-      Name: !Sub '${AWS::StackName}-DefaultVpc'
+      Name: !Sub '${AWS::StackName}-FoundationVpc'
 
-  DefaultSubnet1:
-    Description: 'Default Subnet 1 ID'
-    Value: !Ref DefaultSubnet1
+  PublicSubnet1:
+    Description: 'Public Subnet 1 ID'
+    Value: !Ref PublicSubnet1
     Export:
-      Name: !Sub '${AWS::StackName}-DefaultSubnet1'
+      Name: !Sub '${AWS::StackName}-PublicSubnet1'
 
-  DefaultSubnet2:
-    Description: 'Default Subnet 2 ID'
-    Value: !Ref DefaultSubnet2
+  PublicSubnet2:
+    Description: 'Public Subnet 2 ID'
+    Value: !Ref PublicSubnet2
     Export:
-      Name: !Sub '${AWS::StackName}-DefaultSubnet2'
+      Name: !Sub '${AWS::StackName}-PublicSubnet2'
 
   PrivateSubnet1:
     Description: 'Private Subnet 1 ID'
