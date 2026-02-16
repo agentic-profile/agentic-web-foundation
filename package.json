@@ -16,14 +16,14 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "foundation:up":      "aws cloudformation deploy --template-file foundation.yaml --stack-name foundation-staging --parameter-overrides Environment=staging KeyPairName=aws-us-west-2-local --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM",
-    "foundation:up:prod": "aws cloudformation deploy --template-file foundation.yaml --stack-name foundation-prod --parameter-overrides Environment=prod KeyPairName=aws-us-west-2-local --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM",
-    "foundation:down":      "aws cloudformation delete-stack --stack-name foundation-staging",
-    "foundation:down:prod": "aws cloudformation delete-stack --stack-name foundation-prod",
+    "up":      "aws cloudformation deploy --template-file foundation.yaml --stack-name agentic-web-foundation-staging --parameter-overrides EmptyDeploymentBucketOnDelete=true Stage=staging --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM",
+    "up:prod": "aws cloudformation deploy --template-file foundation.yaml --stack-name agentic-web-foundation --parameter-overrides Stage=prod --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM",
+    "down":      "aws cloudformation delete-stack --stack-name agentic-web-foundation-staging",
+    "down:prod": "aws cloudformation delete-stack --stack-name agentic-web-foundation",
     
-    "foundation:status":      "aws cloudformation describe-stacks --stack-name foundation-staging --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo 'STACK_DELETED'",
-    "foundation:status:prod": "aws cloudformation describe-stacks --stack-name foundation-prod --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo 'STACK_DELETED'",
-    "foundation:events":      "aws cloudformation describe-stack-events --stack-name foundation-staging --query 'StackEvents[0:5]' --output table",
-    "foundation:events:prod": "aws cloudformation describe-stack-events --stack-name foundation-prod --query 'StackEvents[0:5]' --output table"
+    "status":      "aws cloudformation describe-stacks --stack-name agentic-web-foundation-staging --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo 'STACK_DELETED'",
+    "status:prod": "aws cloudformation describe-stacks --stack-name agentic-web-foundation --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo 'STACK_DELETED'",
+    "events":      "aws cloudformation describe-stack-events --stack-name agentic-web-foundation-staging --query 'StackEvents[0:5]' --output table",
+    "events:prod": "aws cloudformation describe-stack-events --stack-name agentic-web-foundation --query 'StackEvents[0:5]' --output table"
   }
 }

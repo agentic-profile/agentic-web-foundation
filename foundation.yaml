@@ -1,51 +1,140 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Foundation Infrastructure for Agentic Lambda Functions'
+Description: 'Foundation Infrastructure for Agentic workloads'
 
 Parameters:
-  Environment:
+  ProjectName:
+    Type: String
+    Default: agentic-web-foundation
+    Description: Lowercase project identifier used in resource names and tags
+    AllowedPattern: '^[a-z0-9-]+$'
+    ConstraintDescription: ProjectName must be lowercase letters, numbers, and dashes only
+
+  Stage:
     Type: String
     Default: staging
-    Description: Environment name (staging, prod)
+    Description: Deployment stage
     AllowedValues: [staging, prod]
 
-  KeyPairName:
-    Type: AWS::EC2::KeyPair::KeyName
-    Description: EC2 Key Pair for SSH access to NAT instance
-    ConstraintDescription: Must be the name of an existing EC2 KeyPair
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: VPC CIDR block
+
+  EmptyDeploymentBucketOnDelete:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: In staging, empty the deployment bucket before deletion (ignored in prod)
+
+Mappings:
+  StageToConfig:
+    prod:
+      PrefixSuffix: ''
+    staging:
+      PrefixSuffix: '-staging'
+
+Conditions:
+  IsProd: !Equals [!Ref Stage, prod]
+  IsStaging: !Equals [!Ref Stage, staging]
+  ShouldEmptyDeploymentBucketCondition: !And [!Condition IsStaging, !Equals [!Ref EmptyDeploymentBucketOnDelete, 'true']]
 
 Resources:
-  # S3 Bucket for Lambda Deployment
-  DeploymentBucket:
+  # -----------------------------
+  # Deployment bucket (staging vs prod)
+  # -----------------------------
+  DeploymentBucketProd:
+    Condition: IsProd
     Type: AWS::S3::Bucket
-    DeletionPolicy: Delete
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
-      BucketName: !Sub 'agentic-foundation-deployment-${AWS::AccountId}-${Environment}'
+      BucketName: !Sub
+        - '${ProjectName}${PrefixSuffix}-deployment-${AWS::AccountId}-${AWS::Region}'
+        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
       VersioningConfiguration:
         Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: ExpireNoncurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
       Tags:
-        - Key: Environment
-          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
         - Key: Service
           Value: agentic-foundation
 
-  # Custom resource to empty S3 bucket on stack deletion
+  DeploymentBucketStaging:
+    Condition: IsStaging
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub
+        - '${ProjectName}${PrefixSuffix}-deployment-${AWS::AccountId}-${AWS::Region}'
+        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+          - Id: ExpireNoncurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: Service
+          Value: agentic-foundation
+
+  # Custom resource to empty S3 bucket on stack deletion (staging only)
   EmptyBucketOnDelete:
+    Condition: ShouldEmptyDeploymentBucketCondition
     Type: Custom::EmptyBucket
     Properties:
       ServiceToken: !GetAtt EmptyBucketFunction.Arn
-      BucketName: !Ref DeploymentBucket
+      BucketName: !Ref DeploymentBucketStaging
 
-  # Lambda function to empty S3 bucket
+  # Lambda function to empty S3 bucket (staging only)
   EmptyBucketFunction:
+    Condition: ShouldEmptyDeploymentBucketCondition
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: !Sub 'agentic-foundation-empty-bucket-${Environment}'
-      Runtime: python3.9
+      FunctionName: !Sub
+        - '${ProjectName}${PrefixSuffix}-empty-bucket'
+        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+      Runtime: python3.12
       Handler: index.lambda_handler
       Role: !GetAtt EmptyBucketRole.Arn
       Timeout: 300
@@ -53,59 +142,70 @@ Resources:
         ZipFile: |
           import boto3
           import json
-          import cfnresponse
+          import urllib.request
+          import traceback
+          
+          def _send(event, context, status, data=None, physical_resource_id=None, reason=None):
+              response_url = event["ResponseURL"]
+              response_body = {
+                  "Status": status,
+                  "Reason": reason or f"See CloudWatch Log Stream: {getattr(context, 'log_stream_name', 'n/a')}",
+                  "PhysicalResourceId": physical_resource_id or getattr(context, "log_stream_name", "empty-bucket"),
+                  "StackId": event["StackId"],
+                  "RequestId": event["RequestId"],
+                  "LogicalResourceId": event["LogicalResourceId"],
+                  "NoEcho": False,
+                  "Data": data or {},
+              }
+              body = json.dumps(response_body).encode("utf-8")
+              req = urllib.request.Request(
+                  response_url,
+                  data=body,
+                  headers={"content-type": "", "content-length": str(len(body))},
+                  method="PUT",
+              )
+              with urllib.request.urlopen(req) as _:
+                  pass
           
           def lambda_handler(event, context):
-              s3 = boto3.client('s3')
-              
+              s3 = boto3.client("s3")
+              bucket_name = event.get("ResourceProperties", {}).get("BucketName")
               try:
-                  bucket_name = event['ResourceProperties']['BucketName']
-                  
-                  if event['RequestType'] == 'Delete':
-                      # Empty the bucket
-                      print(f"Emptying bucket: {bucket_name}")
-                      
-                      # Delete all object versions
-                      paginator = s3.get_paginator('list_object_versions')
+                  if not bucket_name:
+                      raise ValueError("Missing ResourceProperties.BucketName")
+          
+                  if event.get("RequestType") == "Delete":
+                      print(f"Emptying bucket before deletion: {bucket_name}")
+                      paginator = s3.get_paginator("list_object_versions")
                       pages = paginator.paginate(Bucket=bucket_name)
-                      
+          
                       delete_keys = []
                       for page in pages:
-                          if 'Versions' in page:
-                              for version in page['Versions']:
-                                  delete_keys.append({
-                                      'Key': version['Key'],
-                                      'VersionId': version['VersionId']
-                                  })
-                          if 'DeleteMarkers' in page:
-                              for marker in page['DeleteMarkers']:
-                                  delete_keys.append({
-                                      'Key': marker['Key'],
-                                      'VersionId': marker['VersionId']
-                                  })
-                      
-                      # Delete in batches of 1000 (S3 limit)
+                          for version in page.get("Versions", []):
+                              delete_keys.append({"Key": version["Key"], "VersionId": version["VersionId"]})
+                          for marker in page.get("DeleteMarkers", []):
+                              delete_keys.append({"Key": marker["Key"], "VersionId": marker["VersionId"]})
+          
                       for i in range(0, len(delete_keys), 1000):
-                          batch = delete_keys[i:i+1000]
+                          batch = delete_keys[i : i + 1000]
                           if batch:
-                              s3.delete_objects(
-                                  Bucket=bucket_name,
-                                  Delete={'Objects': batch}
-                              )
-                      
-                      print(f"Successfully emptied bucket: {bucket_name}")
-                  
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
-              
+                              s3.delete_objects(Bucket=bucket_name, Delete={"Objects": batch})
+          
+                      print(f"Emptied bucket: {bucket_name}")
+          
+                  _send(event, context, "SUCCESS", {})
               except Exception as e:
-                  print(f"Error: {str(e)}")
-                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+                  traceback.print_exc()
+                  _send(event, context, "FAILED", {}, reason=str(e))
 
-  # IAM Role for EmptyBucket Lambda
+  # IAM Role for EmptyBucket Lambda (staging only)
   EmptyBucketRole:
+    Condition: ShouldEmptyDeploymentBucketCondition
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub 'agentic-foundation-empty-bucket-role-${Environment}'
+      RoleName: !Sub
+        - '${ProjectName}${PrefixSuffix}-empty-bucket-role'
+        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -127,124 +227,61 @@ Resources:
                   - s3:DeleteObject
                   - s3:DeleteObjectVersion
                 Resource:
-                  - !GetAtt DeploymentBucket.Arn
-                  - !Sub '${DeploymentBucket.Arn}/*'
+                  - !GetAtt DeploymentBucketStaging.Arn
+                  - !Sub '${DeploymentBucketStaging.Arn}/*'
 
-
-  # Valkey Cache Serverless (Redis-compatible)
-  ValkeyCacheServerless:
-    Type: AWS::ElastiCache::ServerlessCache
-    Properties:
-      ServerlessCacheName: !Sub 'agentic-foundation-valkey-${Environment}'
-      Engine: valkey
-      UserGroupId: !Ref ValkeyUserGroup
-      SubnetIds:
-        - !Ref PrivateSubnet1
-        - !Ref PrivateSubnet2
-      SecurityGroupIds:
-        - !Ref ValkeySecurityGroup
-      Description: Serverless Valkey cache for agentic foundation
-      Tags:
-        - Key: Name
-          Value: !Sub 'agentic-foundation-valkey-${Environment}'
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Service
-          Value: agentic-foundation
-
-  # User Group for Serverless Cache
-  ValkeyUserGroup:
-    Type: AWS::ElastiCache::UserGroup
-    Properties:
-      UserGroupId: !Sub 'agentic-foundation-users-${Environment}'
-      Engine: valkey
-      UserIds:
-        - !Ref ValkeyUser
-
-  # User for Serverless Cache
-  ValkeyUser:
-    Type: AWS::ElastiCache::User
-    Properties:
-      UserId: !Sub 'agentic-foundation-user-${Environment}'
-      Engine: valkey
-      UserName: default
-      Passwords:
-        - !Sub '{{resolve:secretsmanager:${ValkeyPassword}:SecretString:password}}'
-      AccessString: on ~* +@all
-
-  # Password for Serverless Cache
-  ValkeyPassword:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: !Sub 'agentic-foundation-valkey-password-${Environment}'
-      Description: Password for Valkey serverless cache
-      GenerateSecretString:
-        SecretStringTemplate: '{"username": "default"}'
-        GenerateStringKey: password
-        PasswordLength: 32
-        ExcludeCharacters: '"@/\'
-      Tags:
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Service
-          Value: agentic-foundation
-
-  # Security Group for Valkey Cache
-  ValkeySecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Security group for Valkey serverless cache
-      VpcId: !Ref FoundationVpc
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 6379
-          ToPort: 6379
-          CidrIp: 0.0.0.0/0
-          Description: Allow Redis/Valkey access from anywhere (IPv4)
-        - IpProtocol: tcp
-          FromPort: 6379
-          ToPort: 6379
-          CidrIpv6: ::/0
-          Description: Allow Redis/Valkey access from anywhere (IPv6)
-
-  # Foundation VPC
+  # -----------------------------
+  # VPC + networking
+  # -----------------------------
   FoundationVpc:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: 10.0.0.0/16
+      CidrBlock: !Ref VpcCidr
       EnableDnsHostnames: true
       EnableDnsSupport: true
       Tags:
         - Key: Name
-          Value: !Sub 'agentic-foundation-vpc-${Environment}'
-        - Key: Environment
-          Value: !Ref Environment
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-vpc'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
 
-  # Internet Gateway
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
         - Key: Name
-          Value: !Sub 'agentic-foundation-igw-${Environment}'
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-igw'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
 
-  # Attach Internet Gateway to VPC
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
       VpcId: !Ref FoundationVpc
       InternetGatewayId: !Ref InternetGateway
 
-  # Route Table
   RouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref FoundationVpc
       Tags:
         - Key: Name
-          Value: !Sub 'agentic-foundation-rt-${Environment}'
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-public-rt'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
 
-  # Default Route
   DefaultRoute:
     Type: AWS::EC2::Route
     DependsOn: AttachGateway
@@ -253,7 +290,6 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
-  # Subnet 1
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -263,9 +299,14 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub 'agentic-foundation-subnet-1-${Environment}'
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-public-subnet-1'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
 
-  # Subnet 2
   PublicSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
@@ -275,23 +316,26 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub 'agentic-foundation-subnet-2-${Environment}'
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-public-subnet-2'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
 
-  # Associate Subnet 1 with Route Table
   Subnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet1
       RouteTableId: !Ref RouteTable
 
-  # Associate Subnet 2 with Route Table
   Subnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref RouteTable
 
-  # Private Subnet 1 for Lambda functions
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -301,9 +345,14 @@ Resources:
       MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
-          Value: !Sub 'agentic-foundation-private-subnet-1-${Environment}'
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-private-subnet-1'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
 
-  # Private Subnet 2 for Lambda functions
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
@@ -313,370 +362,39 @@ Resources:
       MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
-          Value: !Sub 'agentic-foundation-private-subnet-2-${Environment}'
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-private-subnet-2'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
 
-  # Elastic IP for NAT Instance
-  NatInstanceEIP:
-    Type: AWS::EC2::EIP
-    DependsOn: AttachGateway
-    Properties:
-      Domain: vpc
-      Tags:
-        - Key: Name
-          Value: !Sub 'agentic-foundation-nat-eip-${Environment}'
-
-  # Attach EIP to NAT Instance
-  NatInstanceEIPAssociation:
-    Type: AWS::EC2::EIPAssociation
-    Properties:
-      InstanceId: !Ref NatInstance
-      EIP: !Ref NatInstanceEIP
-
-  # Security Group for NAT Instance
-  NatInstanceSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Security group for NAT instance
-      VpcId: !Ref FoundationVpc
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 10.0.0.0/16
-          Description: Allow HTTP from VPC
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 10.0.0.0/16
-          Description: Allow HTTPS from VPC
-        - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          CidrIp: 0.0.0.0/0
-          Description: Allow SSH for management
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-          Description: Allow all outbound traffic
-      Tags:
-        - Key: Name
-          Value: !Sub 'agentic-foundation-nat-instance-sg-${Environment}'
-
-  # NAT Instance (EC2-based)
-  NatInstance:
-    Type: AWS::EC2::Instance
-    Properties:
-      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64}}'
-      InstanceType: t4g.nano
-      KeyName: !Ref KeyPairName
-      SubnetId: !Ref PublicSubnet1
-      SecurityGroupIds:
-        - !Ref NatInstanceSecurityGroup
-      SourceDestCheck: false
-      IamInstanceProfile: !Ref NatInstanceProfile
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euo pipefail  # Exit on error, undefined vars, pipe failures
-          
-          # Logging function
-          log() {
-              echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a /var/log/nat-setup.log
-          }
-          
-          log "Starting NAT instance configuration..."
-          
-          # Update system packages
-          yum update -y
-          
-          # Install nftables if not present
-          yum install -y nftables
-          
-          # Enable IP forwarding permanently
-          log "Configuring IP forwarding..."
-          if ! grep -q "net.ipv4.ip_forward = 1" /etc/sysctl.conf; then
-              echo 'net.ipv4.ip_forward = 1' >> /etc/sysctl.conf
-          fi
-          sysctl -w net.ipv4.ip_forward=1
-          
-          # Configure DNS (preserve existing and add fallbacks)
-          log "Configuring DNS resolution..."
-          if ! grep -q "169.254.169.253" /etc/resolv.conf; then
-              # Backup original resolv.conf
-              cp /etc/resolv.conf /etc/resolv.conf.backup
-              # Add AWS DNS resolver and Google DNS as fallback
-              {
-                  echo "nameserver 169.254.169.253"
-                  echo "nameserver 8.8.8.8"
-                  echo "nameserver 8.8.4.4"
-              } >> /etc/resolv.conf
-          fi
-          
-          # Create nftables directory if it doesn't exist
-          mkdir -p /etc/nftables
-          
-          # Get the primary network interface name dynamically
-          log "Detecting primary network interface..."
-          PRIMARY_INTERFACE=$(ip route show default | awk '/default/ { print $5 }' | head -1)
-          log "Primary interface detected: $PRIMARY_INTERFACE"
-          
-          # Configure NAT using nftables with improved security
-          log "Creating nftables configuration..."
-          cat > /etc/nftables/nat-instance.nft << EOF
-          #!/usr/sbin/nft -f
-          
-          # Clear existing rules
-          flush ruleset
-          
-          # Define NAT table for masquerading
-          table inet nat {
-              # Chain for postrouting (MASQUERADE)
-              chain postrouting {
-                  type nat hook postrouting priority srcnat; policy accept;
-                  # MASQUERADE traffic from VPC going out through primary interface
-                  ip saddr 10.0.0.0/16 oifname "$PRIMARY_INTERFACE" masquerade
-              }
-          }
-          
-          # Define filter table for packet filtering
-          table inet filter {
-              # Input chain - secure but functional
-              chain input {
-                  type filter hook input priority filter; policy drop;
-                  
-                  # Allow loopback traffic
-                  iifname "lo" accept
-                  
-                  # Allow established and related connections
-                  ct state established,related accept
-                  
-                  # Allow SSH for management
-                  tcp dport 22 accept
-                  
-                  # Allow ICMP for diagnostics
-                  icmp type { echo-request, destination-unreachable, time-exceeded } accept
-                  icmpv6 type { echo-request, destination-unreachable, time-exceeded, nd-neighbor-solicit, nd-neighbor-advert } accept
-              }
-              
-              # Forward chain - controlled forwarding
-              chain forward {
-                  type filter hook forward priority filter; policy drop;
-                  
-                  # Allow loopback
-                  iifname "lo" accept
-                  
-                  # Allow established and related connections
-                  ct state established,related accept
-                  
-                  # Allow forwarding from VPC private subnets to internet
-                  ip saddr 10.0.3.0/24 oifname "$PRIMARY_INTERFACE" accept
-                  ip saddr 10.0.4.0/24 oifname "$PRIMARY_INTERFACE" accept
-                  
-                  # Allow other VPC traffic to internet (broader fallback)
-                  ip saddr 10.0.0.0/16 oifname "$PRIMARY_INTERFACE" accept
-                  
-                  # Log dropped packets for debugging (optional)
-                  limit rate 10/minute log prefix "NAT-DROP: "
-              }
-              
-              # Output chain - allow all outbound
-              chain output {
-                  type filter hook output priority filter; policy accept;
-              }
-          }
-          EOF
-          
-          # Validate nftables configuration syntax
-          log "Validating nftables configuration..."
-          if ! nft -c -f /etc/nftables/nat-instance.nft; then
-              log "ERROR: nftables configuration syntax is invalid!"
-              exit 1
-          fi
-          
-          # Apply nftables configuration
-          log "Applying nftables configuration..."
-          nft -f /etc/nftables/nat-instance.nft
-          
-          # Enable nftables service
-          systemctl enable nftables
-          systemctl start nftables
-          
-          # Create systemd service to ensure rules persist on reboot
-          log "Creating systemd service for NAT rules persistence..."
-          cat > /etc/systemd/system/nat-instance.service << 'EOF'
-          [Unit]
-          Description=NAT Instance nftables rules
-          After=network-online.target nftables.service
-          Wants=network-online.target
-          Requires=nftables.service
-          
-          [Service]
-          Type=oneshot
-          ExecStartPre=/usr/bin/sleep 5
-          ExecStart=/usr/sbin/nft -f /etc/nftables/nat-instance.nft
-          ExecReload=/usr/sbin/nft -f /etc/nftables/nat-instance.nft
-          RemainAfterExit=true
-          TimeoutSec=30
-          
-          [Install]
-          WantedBy=multi-user.target
-          EOF
-          
-          # Reload systemd and enable the custom service
-          systemctl daemon-reload
-          systemctl enable nat-instance.service
-          systemctl start nat-instance.service
-          
-          # Verify the service started successfully
-          if systemctl is-active --quiet nat-instance.service; then
-              log "NAT instance service started successfully"
-          else
-              log "WARNING: NAT instance service failed to start"
-              systemctl status nat-instance.service >> /var/log/nat-setup.log
-          fi
-          
-          # Verify IP forwarding is enabled
-          if [ "$(cat /proc/sys/net/ipv4/ip_forward)" = "1" ]; then
-              log "IP forwarding is enabled"
-          else
-              log "ERROR: IP forwarding is not enabled"
-              exit 1
-          fi
-          
-          # Test basic connectivity
-          log "Testing basic connectivity..."
-          if ping -c 1 8.8.8.8 > /dev/null 2>&1; then
-              log "Internet connectivity test passed"
-          else
-              log "WARNING: Internet connectivity test failed"
-          fi
-          
-          # Display current nftables rules for verification
-          log "Current nftables ruleset:"
-          nft list ruleset >> /var/log/nat-setup.log
-          
-          log "NAT instance configuration completed successfully at $(date)"
-      Tags:
-        - Key: Name
-          Value: !Sub 'agentic-foundation-nat-instance-${Environment}'
-        - Key: ConfigVersion
-          Value: "v4-nftables-inet-permissive"
-
-  # IAM Role for NAT Instance
-  NatInstanceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub 'agentic-foundation-nat-instance-role-${Environment}'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ec2.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
-      Tags:
-        - Key: Name
-          Value: !Sub 'agentic-foundation-nat-instance-role-${Environment}'
-
-  # Instance Profile for NAT Instance
-  NatInstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      InstanceProfileName: !Sub 'agentic-foundation-nat-instance-profile-${Environment}'
-      Roles:
-        - !Ref NatInstanceRole
-
-  # Private Route Table for Lambda subnets
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref FoundationVpc
       Tags:
         - Key: Name
-          Value: !Sub 'agentic-foundation-private-rt-${Environment}'
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-private-rt'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
 
-  # Private Route to NAT Instance
-  PrivateRoute:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      InstanceId: !Ref NatInstance
-
-  # Associate Private Subnet 1 with Private Route Table
   PrivateSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet1
       RouteTableId: !Ref PrivateRouteTable
 
-  # Associate Private Subnet 2 with Private Route Table
   PrivateSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet2
       RouteTableId: !Ref PrivateRouteTable
-
-  # Security Group for VPC Endpoints
-  VpcEndpointSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Security group for VPC endpoints
-      VpcId: !Ref FoundationVpc
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 10.0.0.0/16
-          Description: Allow HTTPS access from VPC
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-          Description: Allow all outbound traffic
-
-  # VPC Endpoint for Secrets Manager
-  SecretsManagerVpcEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref FoundationVpc
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
-      VpcEndpointType: Interface
-      SubnetIds:
-        - !Ref PrivateSubnet1
-        - !Ref PrivateSubnet2
-      SecurityGroupIds:
-        - !Ref VpcEndpointSecurityGroup
-      PrivateDnsEnabled: true
-
-  # VPC Endpoint for Lambda (for Lambda-to-Lambda calls)
-  LambdaVpcEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref FoundationVpc
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.lambda'
-      VpcEndpointType: Interface
-      SubnetIds:
-        - !Ref PrivateSubnet1
-        - !Ref PrivateSubnet2
-      SecurityGroupIds:
-        - !Ref VpcEndpointSecurityGroup
-      PrivateDnsEnabled: true
-
-  # VPC Endpoint for CloudWatch Logs
-  CloudWatchLogsVpcEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref FoundationVpc
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
-      VpcEndpointType: Interface
-      SubnetIds:
-        - !Ref PrivateSubnet1
-        - !Ref PrivateSubnet2
-      SecurityGroupIds:
-        - !Ref VpcEndpointSecurityGroup
-      PrivateDnsEnabled: true
 
   # VPC Endpoint for S3 (Gateway endpoint - no hourly cost)
   S3VpcEndpoint:
@@ -687,94 +405,237 @@ Resources:
       VpcEndpointType: Gateway
       RouteTableIds:
         - !Ref PrivateRouteTable
+      Tags:
+        - Key: Name
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-s3-vpce'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+
+  # -----------------------------
+  # NAT Gateway (only supported NAT option)
+  # -----------------------------
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-natgw-eip'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-natgw'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+
+  PrivateRouteToNatGateway:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  # -----------------------------
+  # Valkey (ElastiCache Serverless)
+  # -----------------------------
+  ValkeySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Valkey serverless cache
+      VpcId: !Ref FoundationVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          CidrIp: !Ref VpcCidr
+          Description: Allow Redis/Valkey access from within the VPC only
+      Tags:
+        - Key: Name
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-valkey-sg'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+
+  ValkeyPassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub
+        - '${ProjectName}${PrefixSuffix}-valkey-password'
+        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+      Description: Password for Valkey serverless cache
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "default"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: Service
+          Value: agentic-foundation
+
+  ValkeyUser:
+    Type: AWS::ElastiCache::User
+    Properties:
+      UserId: !Sub
+        - '${ProjectName}${PrefixSuffix}-user'
+        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+      Engine: valkey
+      UserName: default
+      Passwords:
+        - !Sub '{{resolve:secretsmanager:${ValkeyPassword}:SecretString:password}}'
+      AccessString: on ~* +@all
+
+  ValkeyUserGroup:
+    Type: AWS::ElastiCache::UserGroup
+    Properties:
+      UserGroupId: !Sub
+        - '${ProjectName}${PrefixSuffix}-users'
+        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+      Engine: valkey
+      UserIds:
+        - !Ref ValkeyUser
+
+  ValkeyCacheServerless:
+    Type: AWS::ElastiCache::ServerlessCache
+    Properties:
+      ServerlessCacheName: !Sub
+        - '${ProjectName}${PrefixSuffix}-valkey'
+        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+      Engine: valkey
+      UserGroupId: !Ref ValkeyUserGroup
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref ValkeySecurityGroup
+      Description: Serverless Valkey cache for agentic foundation
+      Tags:
+        - Key: Name
+          Value: !Sub
+            - '${ProjectName}${PrefixSuffix}-valkey'
+            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Stage
+          Value: !Ref Stage
+        - Key: Service
+          Value: agentic-foundation
 
 Outputs:
+  ProjectName:
+    Description: Project name
+    Value: !Ref ProjectName
+
+  Stage:
+    Description: Deployment stage
+    Value: !Ref Stage
+
+  ProjectPrefix:
+    Description: Project prefix (ProjectName in prod, ProjectName-Stage otherwise)
+    Value: !Sub
+      - '${ProjectName}${PrefixSuffix}'
+      - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+
   DeploymentBucketName:
-    Description: 'S3 Bucket for Lambda Deployment'
-    Value: !Ref DeploymentBucket
+    Description: S3 bucket for deployment artifacts
+    Value: !If [IsProd, !Ref DeploymentBucketProd, !Ref DeploymentBucketStaging]
     Export:
       Name: !Sub '${AWS::StackName}-DeploymentBucketName'
 
   DeploymentBucketArn:
-    Description: 'S3 Bucket ARN for Lambda Deployment'
-    Value: !GetAtt DeploymentBucket.Arn
+    Description: S3 bucket ARN for deployment artifacts
+    Value: !If [IsProd, !GetAtt DeploymentBucketProd.Arn, !GetAtt DeploymentBucketStaging.Arn]
     Export:
       Name: !Sub '${AWS::StackName}-DeploymentBucketArn'
 
   ValkeyCacheEndpoint:
-    Description: 'Valkey Serverless Cache Endpoint'
+    Description: Valkey Serverless Cache Endpoint
     Value: !GetAtt ValkeyCacheServerless.Endpoint.Address
     Export:
       Name: !Sub '${AWS::StackName}-ValkeyCacheEndpoint'
 
   ValkeyCachePort:
-    Description: 'Valkey Serverless Cache Port'
+    Description: Valkey Serverless Cache Port
     Value: !GetAtt ValkeyCacheServerless.Endpoint.Port
     Export:
       Name: !Sub '${AWS::StackName}-ValkeyCachePort'
 
   ValkeySecurityGroupId:
-    Description: 'Valkey Security Group ID'
+    Description: Valkey Security Group ID
     Value: !Ref ValkeySecurityGroup
     Export:
       Name: !Sub '${AWS::StackName}-ValkeySecurityGroupId'
 
   ValkeyPasswordSecretArn:
-    Description: 'Valkey Password Secret ARN'
+    Description: Valkey Password Secret ARN
     Value: !Ref ValkeyPassword
     Export:
       Name: !Sub '${AWS::StackName}-ValkeyPasswordSecretArn'
 
   ValkeyUserGroupId:
-    Description: 'Valkey User Group ID'
+    Description: Valkey User Group ID
     Value: !Ref ValkeyUserGroup
     Export:
       Name: !Sub '${AWS::StackName}-ValkeyUserGroupId'
 
-  FoundationVpc:
-    Description: 'Foundation VPC ID'
+  FoundationVpcId:
+    Description: Foundation VPC ID
     Value: !Ref FoundationVpc
     Export:
       Name: !Sub '${AWS::StackName}-FoundationVpc'
 
-  PublicSubnet1:
-    Description: 'Public Subnet 1 ID'
+  PublicSubnet1Id:
+    Description: Public Subnet 1 ID
     Value: !Ref PublicSubnet1
     Export:
       Name: !Sub '${AWS::StackName}-PublicSubnet1'
 
-  PublicSubnet2:
-    Description: 'Public Subnet 2 ID'
+  PublicSubnet2Id:
+    Description: Public Subnet 2 ID
     Value: !Ref PublicSubnet2
     Export:
       Name: !Sub '${AWS::StackName}-PublicSubnet2'
 
-  PrivateSubnet1:
-    Description: 'Private Subnet 1 ID'
+  PrivateSubnet1Id:
+    Description: Private Subnet 1 ID
     Value: !Ref PrivateSubnet1
     Export:
       Name: !Sub '${AWS::StackName}-PrivateSubnet1'
 
-  PrivateSubnet2:
-    Description: 'Private Subnet 2 ID'
+  PrivateSubnet2Id:
+    Description: Private Subnet 2 ID
     Value: !Ref PrivateSubnet2
     Export:
       Name: !Sub '${AWS::StackName}-PrivateSubnet2'
 
-  NatInstanceId:
-    Description: 'NAT Instance ID'
-    Value: !Ref NatInstance
+  NatGatewayId:
+    Description: NAT Gateway ID
+    Value: !Ref NatGateway
     Export:
-      Name: !Sub '${AWS::StackName}-NatInstanceId'
-
-  NatInstanceEIP:
-    Description: 'NAT Instance Elastic IP'
-    Value: !Ref NatInstanceEIP
-    Export:
-      Name: !Sub '${AWS::StackName}-NatInstanceEIP'
-
-  NatInstancePublicIp:
-    Description: 'NAT Instance Public IP'
-    Value: !GetAtt NatInstance.PublicIp
-    Export:
-      Name: !Sub '${AWS::StackName}-NatInstancePublicIp' 
+      Name: !Sub '${AWS::StackName}-NatGatewayId'
