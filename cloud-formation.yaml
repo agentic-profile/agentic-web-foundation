@@ -9,48 +9,61 @@ Parameters:
     AllowedPattern: '^[a-z0-9-]+$'
     ConstraintDescription: ProjectName must be lowercase letters, numbers, and dashes only
 
-  Stage:
-    Type: String
-    Default: staging
-    Description: Deployment stage
-    AllowedValues: [staging, prod]
-
   VpcCidr:
     Type: String
     Default: 10.0.0.0/16
     Description: VPC CIDR block
 
-  EmptyDeploymentBucketOnDelete:
+  NatGatewayMode:
     Type: String
-    Default: 'false'
-    AllowedValues: ['true', 'false']
-    Description: In staging, empty the deployment bucket before deletion (ignored in prod)
+    Default: single
+    AllowedValues:
+      - single
+      - multi
+    Description: Use a single NAT Gateway (cheaper) or one NAT Gateway per AZ (more resilient, less cross-AZ egress)
 
-Mappings:
-  StageToConfig:
-    prod:
-      PrefixSuffix: ''
-    staging:
-      PrefixSuffix: '-staging'
+  DeploymentBucketRemovalPolicy:
+    Type: String
+    Default: delete
+    AllowedValues:
+      - retain
+      - delete
+    Description: Retain keeps the deployment bucket on stack deletion; delete empties and deletes it (destructive)
+
+  EmptyBucketLogRetentionDays:
+    Type: Number
+    Default: 14
+    MinValue: 1
+    MaxValue: 3653
+    Description: CloudWatch Logs retention for the empty-bucket custom resource Lambda (only used when DeploymentBucketRemovalPolicy=delete)
 
 Conditions:
-  IsProd: !Equals [!Ref Stage, prod]
-  IsStaging: !Equals [!Ref Stage, staging]
-  ShouldEmptyDeploymentBucketCondition: !And [!Condition IsStaging, !Equals [!Ref EmptyDeploymentBucketOnDelete, 'true']]
+  UseMultiNat: !Equals [!Ref NatGatewayMode, multi]
+  UseSingleNat: !Equals [!Ref NatGatewayMode, single]
+  RetainDeploymentBucket: !Equals [!Ref DeploymentBucketRemovalPolicy, retain]
+  DeleteDeploymentBucket: !Equals [!Ref DeploymentBucketRemovalPolicy, delete]
 
 Resources:
-  # -----------------------------
-  # Deployment bucket (staging vs prod)
-  # -----------------------------
-  DeploymentBucketProd:
-    Condition: IsProd
+
+  DeploymentBucketRetain:
     Type: AWS::S3::Bucket
+    Condition: RetainDeploymentBucket
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
+      # Bucket names must be globally unique. CloudFormation doesn't have a random()
+      # intrinsic, so we derive a stable unique suffix from this stack's ID.
       BucketName: !Sub
-        - '${ProjectName}${PrefixSuffix}-deployment-${AWS::AccountId}-${AWS::Region}'
-        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - '${ProjectName}-${Suffix}-deploy'
+        - Suffix: !Select
+            - 0
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - '/'
+                  - !Ref AWS::StackId
       VersioningConfiguration:
         Status: Enabled
       BucketEncryption:
@@ -75,20 +88,26 @@ Resources:
       Tags:
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
-        - Key: Service
-          Value: agentic-foundation
 
-  DeploymentBucketStaging:
-    Condition: IsStaging
+  DeploymentBucketDelete:
     Type: AWS::S3::Bucket
+    Condition: DeleteDeploymentBucket
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Properties:
+      # Bucket names must be globally unique. CloudFormation doesn't have a random()
+      # intrinsic, so we derive a stable unique suffix from this stack's ID.
       BucketName: !Sub
-        - '${ProjectName}${PrefixSuffix}-deployment-${AWS::AccountId}-${AWS::Region}'
-        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - '${ProjectName}-${Suffix}-deploy'
+        - Suffix: !Select
+            - 0
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - '/'
+                  - !Ref AWS::StackId
       VersioningConfiguration:
         Status: Enabled
       BucketEncryption:
@@ -113,27 +132,70 @@ Resources:
       Tags:
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
-        - Key: Service
-          Value: agentic-foundation
 
-  # Custom resource to empty S3 bucket on stack deletion (staging only)
+  DeploymentBucketPolicyRetain:
+    Type: AWS::S3::BucketPolicy
+    Condition: RetainDeploymentBucket
+    Properties:
+      Bucket: !Ref DeploymentBucketRetain
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt DeploymentBucketRetain.Arn
+              - !Sub '${DeploymentBucketRetain.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  DeploymentBucketPolicyDelete:
+    Type: AWS::S3::BucketPolicy
+    Condition: DeleteDeploymentBucket
+    Properties:
+      Bucket: !Ref DeploymentBucketDelete
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt DeploymentBucketDelete.Arn
+              - !Sub '${DeploymentBucketDelete.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+
+  # Custom resource to empty S3 bucket on stack deletion
   EmptyBucketOnDelete:
-    Condition: ShouldEmptyDeploymentBucketCondition
     Type: Custom::EmptyBucket
+    Condition: DeleteDeploymentBucket
     Properties:
       ServiceToken: !GetAtt EmptyBucketFunction.Arn
-      BucketName: !Ref DeploymentBucketStaging
+      BucketName: !Ref DeploymentBucketDelete
 
-  # Lambda function to empty S3 bucket (staging only)
+  # Lambda function to empty S3 bucket
   EmptyBucketFunction:
-    Condition: ShouldEmptyDeploymentBucketCondition
     Type: AWS::Lambda::Function
+    Condition: DeleteDeploymentBucket
     Properties:
       FunctionName: !Sub
-        - '${ProjectName}${PrefixSuffix}-empty-bucket'
-        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - '${ProjectName}-${Suffix}-empty-bucket'
+        - Suffix: !Select
+            - 0
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - '/'
+                  - !Ref AWS::StackId
       Runtime: python3.12
       Handler: index.lambda_handler
       Role: !GetAtt EmptyBucketRole.Arn
@@ -198,14 +260,47 @@ Resources:
                   traceback.print_exc()
                   _send(event, context, "FAILED", {}, reason=str(e))
 
-  # IAM Role for EmptyBucket Lambda (staging only)
+  EmptyBucketFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Condition: DeleteDeploymentBucket
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref EmptyBucketFunction
+      Principal: cloudformation.amazonaws.com
+
+  EmptyBucketLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: DeleteDeploymentBucket
+    Properties:
+      LogGroupName: !Sub
+        - '/aws/lambda/${ProjectName}-${Suffix}-empty-bucket'
+        - Suffix: !Select
+            - 0
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - '/'
+                  - !Ref AWS::StackId
+      RetentionInDays: !Ref EmptyBucketLogRetentionDays
+
+  # IAM Role for EmptyBucket Lambda
   EmptyBucketRole:
-    Condition: ShouldEmptyDeploymentBucketCondition
     Type: AWS::IAM::Role
+    Condition: DeleteDeploymentBucket
     Properties:
       RoleName: !Sub
-        - '${ProjectName}${PrefixSuffix}-empty-bucket-role'
-        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - '${ProjectName}-${Suffix}-empty-bucket-role'
+        - Suffix: !Select
+            - 0
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - '/'
+                  - !Ref AWS::StackId
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -227,8 +322,8 @@ Resources:
                   - s3:DeleteObject
                   - s3:DeleteObjectVersion
                 Resource:
-                  - !GetAtt DeploymentBucketStaging.Arn
-                  - !Sub '${DeploymentBucketStaging.Arn}/*'
+                  - !GetAtt DeploymentBucketDelete.Arn
+                  - !Sub '${DeploymentBucketDelete.Arn}/*'
 
   # -----------------------------
   # VPC + networking
@@ -241,26 +336,19 @@ Resources:
       EnableDnsSupport: true
       Tags:
         - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-vpc'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+          Value: !Sub '${ProjectName}-vpc'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
         - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-igw'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+          Value: !Sub '${ProjectName}-igw'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
+
 
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -274,13 +362,9 @@ Resources:
       VpcId: !Ref FoundationVpc
       Tags:
         - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-public-rt'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+          Value: !Sub '${ProjectName}-public-rt'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
 
   DefaultRoute:
     Type: AWS::EC2::Route
@@ -299,13 +383,9 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-public-subnet-1'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+          Value: !Sub '${ProjectName}-public-subnet-1'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
 
   PublicSubnet2:
     Type: AWS::EC2::Subnet
@@ -316,13 +396,10 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-public-subnet-2'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+          Value: !Sub '${ProjectName}-public-subnet-2'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
+
 
   Subnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -345,13 +422,10 @@ Resources:
       MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-private-subnet-1'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+          Value: !Sub '${ProjectName}-private-subnet-1'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
+
 
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
@@ -362,13 +436,10 @@ Resources:
       MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-private-subnet-2'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+          Value: !Sub '${ProjectName}-private-subnet-2'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
+
 
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
@@ -376,24 +447,15 @@ Resources:
       VpcId: !Ref FoundationVpc
       Tags:
         - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-private-rt'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+          Value: !Sub '${ProjectName}-private-rt'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
+
 
   PrivateSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet1
-      RouteTableId: !Ref PrivateRouteTable
-
-  PrivateSubnet2RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PrivateSubnet2
       RouteTableId: !Ref PrivateRouteTable
 
   # VPC Endpoint for S3 (Gateway endpoint - no hourly cost)
@@ -405,18 +467,16 @@ Resources:
       VpcEndpointType: Gateway
       RouteTableIds:
         - !Ref PrivateRouteTable
+        - !If [UseMultiNat, !Ref PrivateRouteTable2, !Ref AWS::NoValue]
       Tags:
         - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-s3-vpce'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+          Value: !Sub '${ProjectName}-s3-vpce'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
+
 
   # -----------------------------
-  # NAT Gateway (only supported NAT option)
+  # NAT Gateway 
   # -----------------------------
   NatGatewayEIP:
     Type: AWS::EC2::EIP
@@ -425,13 +485,9 @@ Resources:
       Domain: vpc
       Tags:
         - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-natgw-eip'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+          Value: !Sub '${ProjectName}-natgw-eip'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
 
   NatGateway:
     Type: AWS::EC2::NatGateway
@@ -440,13 +496,34 @@ Resources:
       SubnetId: !Ref PublicSubnet1
       Tags:
         - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-natgw'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+          Value: !Sub '${ProjectName}-natgw'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
+
+  NatGatewayEIP2:
+    Type: AWS::EC2::EIP
+    Condition: UseMultiNat
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-natgw2-eip'
+        - Key: Project
+          Value: !Ref ProjectName
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Condition: UseMultiNat
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP2.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-natgw2'
+        - Key: Project
+          Value: !Ref ProjectName
+
 
   PrivateRouteToNatGateway:
     Type: AWS::EC2::Route
@@ -455,9 +532,55 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NatGateway
 
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Condition: UseMultiNat
+    Properties:
+      VpcId: !Ref FoundationVpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-rt-2'
+        - Key: Project
+          Value: !Ref ProjectName
+
+  PrivateSubnet2RouteTableAssociationSingle:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: UseSingleNat
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociationMulti:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: UseMultiNat
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  PrivateRouteToNatGateway2:
+    Type: AWS::EC2::Route
+    Condition: UseMultiNat
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
   # -----------------------------
   # Valkey (ElastiCache Serverless)
+  # Admin - manages valkey
+  # Client - connects to valkey for user data caching
   # -----------------------------
+  ValkeyClientSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Attach to services that need to connect to Valkey
+      VpcId: !Ref FoundationVpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-valkey-client-sg'
+        - Key: Project
+          Value: !Ref ProjectName
+
   ValkeySecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -467,66 +590,140 @@ Resources:
         - IpProtocol: tcp
           FromPort: 6379
           ToPort: 6379
-          CidrIp: !Ref VpcCidr
-          Description: Allow Redis/Valkey access from within the VPC only
+          SourceSecurityGroupId: !Ref ValkeyClientSecurityGroup
+          Description: Allow Redis/Valkey access only from services SG
       Tags:
         - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-valkey-sg'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+          Value: !Sub '${ProjectName}-valkey-sg'
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
 
-  ValkeyPassword:
+
+  ValkeyAdminPassword:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Sub
-        - '${ProjectName}${PrefixSuffix}-valkey-password'
-        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - '${ProjectName}-${Suffix}-valkey-admin-password'
+        - Suffix: !Select
+            - 0
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - '/'
+                  - !Ref AWS::StackId
       Description: Password for Valkey serverless cache
       GenerateSecretString:
         SecretStringTemplate: '{"username": "default"}'
         GenerateStringKey: password
         PasswordLength: 32
-        ExcludeCharacters: '"@/\'
+        # Exclude: double-quote, @, /, and backslash
+        ExcludeCharacters: "\"@/\\"
       Tags:
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
-        - Key: Service
-          Value: agentic-foundation
 
-  ValkeyUser:
+  ValkeyClientPassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub
+        - '${ProjectName}-${Suffix}-valkey-client-password'
+        - Suffix: !Select
+            - 0
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - '/'
+                  - !Ref AWS::StackId
+      Description: Password for Valkey client user
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "service"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        # Exclude: double-quote, @, /, and backslash
+        ExcludeCharacters: "\"@/\\"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ValkeyAdminUser:
     Type: AWS::ElastiCache::User
     Properties:
       UserId: !Sub
-        - '${ProjectName}${PrefixSuffix}-user'
-        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - 'valkey-admin-user-${Suffix}'
+        - Suffix: !Select
+            - 0
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - '/'
+                  - !Ref AWS::StackId
       Engine: valkey
       UserName: default
       Passwords:
-        - !Sub '{{resolve:secretsmanager:${ValkeyPassword}:SecretString:password}}'
+        - !Sub '{{resolve:secretsmanager:${ValkeyAdminPassword}:SecretString:password}}'
       AccessString: on ~* +@all
+
+  ValkeyClientUser:
+    Type: AWS::ElastiCache::User
+    Properties:
+      UserId: !Sub
+        - 'valkey-client-user-${Suffix}'
+        - Suffix: !Select
+            - 0
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - '/'
+                  - !Ref AWS::StackId
+      Engine: valkey
+      UserName: service
+      Passwords:
+        - !Sub '{{resolve:secretsmanager:${ValkeyClientPassword}:SecretString:password}}'
+      # Non-admin: allow typical data ops, deny admin/dangerous command categories.
+      # (Services should still use key prefixes for isolation.)
+      AccessString: on ~* +@all -@admin -@dangerous
 
   ValkeyUserGroup:
     Type: AWS::ElastiCache::UserGroup
     Properties:
       UserGroupId: !Sub
-        - '${ProjectName}${PrefixSuffix}-users'
-        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - 'valkey-users-${Suffix}'
+        - Suffix: !Select
+            - 0
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - '/'
+                  - !Ref AWS::StackId
       Engine: valkey
       UserIds:
-        - !Ref ValkeyUser
+        - !Ref ValkeyAdminUser
+        - !Ref ValkeyClientUser
 
   ValkeyCacheServerless:
     Type: AWS::ElastiCache::ServerlessCache
     Properties:
       ServerlessCacheName: !Sub
-        - '${ProjectName}${PrefixSuffix}-valkey'
-        - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
+        - '${ProjectName}-${Suffix}-valkey'
+        - Suffix: !Select
+            - 0
+            - !Split
+              - '-'
+              - !Select
+                - 2
+                - !Split
+                  - '/'
+                  - !Ref AWS::StackId
       Engine: valkey
       UserGroupId: !Ref ValkeyUserGroup
       SubnetIds:
@@ -536,51 +733,35 @@ Resources:
         - !Ref ValkeySecurityGroup
       Description: Serverless Valkey cache for agentic foundation
       Tags:
-        - Key: Name
-          Value: !Sub
-            - '${ProjectName}${PrefixSuffix}-valkey'
-            - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
         - Key: Project
           Value: !Ref ProjectName
-        - Key: Stage
-          Value: !Ref Stage
-        - Key: Service
-          Value: agentic-foundation
 
 Outputs:
   ProjectName:
     Description: Project name
     Value: !Ref ProjectName
 
-  Stage:
-    Description: Deployment stage
-    Value: !Ref Stage
-
-  ProjectPrefix:
-    Description: Project prefix (ProjectName in prod, ProjectName-Stage otherwise)
-    Value: !Sub
-      - '${ProjectName}${PrefixSuffix}'
-      - PrefixSuffix: !FindInMap [StageToConfig, !Ref Stage, PrefixSuffix]
-
+  #===== SharedDeployment Bucket =====
   DeploymentBucketName:
     Description: S3 bucket for deployment artifacts
-    Value: !If [IsProd, !Ref DeploymentBucketProd, !Ref DeploymentBucketStaging]
+    Value: !If [DeleteDeploymentBucket, !Ref DeploymentBucketDelete, !Ref DeploymentBucketRetain]
     Export:
       Name: !Sub '${AWS::StackName}-DeploymentBucketName'
 
   DeploymentBucketArn:
     Description: S3 bucket ARN for deployment artifacts
-    Value: !If [IsProd, !GetAtt DeploymentBucketProd.Arn, !GetAtt DeploymentBucketStaging.Arn]
+    Value: !If [DeleteDeploymentBucket, !GetAtt DeploymentBucketDelete.Arn, !GetAtt DeploymentBucketRetain.Arn]
     Export:
       Name: !Sub '${AWS::StackName}-DeploymentBucketArn'
 
-  ValkeyCacheEndpoint:
+  #===== Valkey/Redis =====
+  ValkeyEndpoint:
     Description: Valkey Serverless Cache Endpoint
     Value: !GetAtt ValkeyCacheServerless.Endpoint.Address
     Export:
       Name: !Sub '${AWS::StackName}-ValkeyCacheEndpoint'
 
-  ValkeyCachePort:
+  ValkeyPort:
     Description: Valkey Serverless Cache Port
     Value: !GetAtt ValkeyCacheServerless.Endpoint.Port
     Export:
@@ -592,11 +773,29 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-ValkeySecurityGroupId'
 
-  ValkeyPasswordSecretArn:
-    Description: Valkey Password Secret ARN
-    Value: !Ref ValkeyPassword
+  ValkeyClientSecurityGroupId:
+    Description: Security Group ID to attach to services that need Valkey access
+    Value: !Ref ValkeyClientSecurityGroup
     Export:
-      Name: !Sub '${AWS::StackName}-ValkeyPasswordSecretArn'
+      Name: !Sub '${AWS::StackName}-ValkeyClientSecurityGroupId'
+
+  ValkeyAdminPasswordSecretArn:
+    Description: Valkey admin password Secret ARN
+    Value: !Ref ValkeyAdminPassword
+    Export:
+      Name: !Sub '${AWS::StackName}-ValkeyAdminPasswordSecretArn'
+
+  ValkeyClientPasswordSecretArn:
+    Description: Valkey service-user password Secret ARN
+    Value: !Ref ValkeyClientPassword
+    Export:
+      Name: !Sub '${AWS::StackName}-ValkeyClientPasswordSecretArn'
+
+  ValkeyClientUserName:
+    Description: Valkey non-admin username for services
+    Value: service
+    Export:
+      Name: !Sub '${AWS::StackName}-ValkeyClientUserName'
 
   ValkeyUserGroupId:
     Description: Valkey User Group ID
@@ -604,6 +803,7 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-ValkeyUserGroupId'
 
+  #===== Network =====
   FoundationVpcId:
     Description: Foundation VPC ID
     Value: !Ref FoundationVpc
@@ -639,3 +839,10 @@ Outputs:
     Value: !Ref NatGateway
     Export:
       Name: !Sub '${AWS::StackName}-NatGatewayId'
+
+  NatGateway2Id:
+    Condition: UseMultiNat
+    Description: NAT Gateway 2 ID (only when NatGatewayMode=multi)
+    Value: !Ref NatGateway2
+    Export:
+      Name: !Sub '${AWS::StackName}-NatGateway2Id'

@@ -1,6 +1,6 @@
 # Agentic Web Foundation (CloudFormation)
 
-This repo provides a single CloudFormation template (`foundation.yaml`) plus npm scripts to deploy a **shared “foundation” stack** for agentic workloads:
+This repo provides a single CloudFormation template (`cloud-formation.yaml`) plus npm scripts to deploy a **shared “foundation” stack** for agentic workloads:
 
 - VPC with public/private subnets
 - Internet gateway + routing
@@ -15,39 +15,68 @@ This repo provides a single CloudFormation template (`foundation.yaml`) plus npm
 
 ## Quickstart
 
-Deploy **staging** (default):
+1. Make sure you have done the prerequisites
+
+2. Create a `cloud.env` file.
 
 ```bash
-npm run foundation:up
+# NOTE: the npm scripts currently validate `ProjectName` but actually use `PROJECT_NAME`.
+# To avoid surprises, set both to the same value.
+PROJECT_NAME=agentic-web-foundation
+ProjectName=agentic-web-foundation
 ```
 
-Deploy **prod**:
+3. Deploy the stack:
 
 ```bash
-npm run foundation:up:prod
+npm run cloud:up
 ```
 
-### Custom project name
-
-All scripts accept a `PROJECT_NAME` env var (defaults to `agentic-web-foundation`):
+4. Write stack outputs to an env file for other projects/scripts:
 
 ```bash
-PROJECT_NAME=myproject npm run foundation:up
-PROJECT_NAME=myproject npm run foundation:up:prod
+npm run results
 ```
+
+5. Copy the resulting `foundation-results.env` into your other projects.
+
+
+## Package scripts
+
+These are the scripts defined in `package.json`:
+
+- **Deploy**
+  - **`npm run cloud:up`**: deploy CloudFormation stack named `${PROJECT_NAME}` using `cloud-formation.yaml`
+- **Delete**
+  - **`npm run cloud:down`**: delete CloudFormation stack named `${PROJECT_NAME}`
+- **Status**
+  - **`npm run status`**: print stack status for `${PROJECT_NAME}` (or `STACK_DELETED`)
+- **Recent events**
+  - **`npm run events`**: show 5 most recent stack events for `${PROJECT_NAME}`
+- **Write outputs to env file**
+  - **`npm run results`**: write CloudFormation Outputs to `foundation-results.env`
+
+`foundation-results.env` is generated output. You probably want it ignored by git.
+
 
 ## Useful parameters
 
 If you’re calling CloudFormation directly (or editing the npm scripts), these are the main knobs:
 
 - **`ProjectName`**: lower-case identifier used in names/tags
-- **`Stage`**: `staging` or `prod`
+- The deployment bucket is always emptied during stack deletion so it can be deleted cleanly
+
+The outputs writer also supports a stage concept (it defaults to `staging` when run directly):
+
+```bash
+node scripts/write-formation-results.js --stage=prod --out=foundation-results.env
+```
 
 Example (staging):
 
 ```bash
 aws cloudformation deploy \
-  --template-file foundation.yaml \
+  --template-file cloud-formation.yaml \
   --stack-name myproject-staging \
   --parameter-overrides ProjectName=myproject Stage=staging \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
