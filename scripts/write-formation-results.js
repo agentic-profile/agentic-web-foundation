@@ -46,8 +46,7 @@ function toDotenvLine(key, value) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  const stage = args.stage || process.env.STAGE || "staging";
-  const outFile = args.out || "formation-results.env";
+  const outFile = args.out || "foundation-results.env";
 
   const repoRoot = path.resolve(__dirname, "..");
   loadEnvFile(path.join(repoRoot, "cloud.env"));
@@ -58,8 +57,6 @@ function main() {
     process.exit(1);
   }
 
-  const stackName = stage === "prod" ? projectName : `${projectName}-staging`;
-
   let parsed;
   try {
     const stdout = execFileSync(
@@ -68,7 +65,7 @@ function main() {
         "cloudformation",
         "describe-stacks",
         "--stack-name",
-        stackName,
+        projectName,
         "--output",
         "json",
       ],
@@ -77,7 +74,7 @@ function main() {
     parsed = JSON.parse(stdout);
   } catch (err) {
     const msg = err && err.stderr ? String(err.stderr) : String(err);
-    console.error(`Failed to read stack outputs for "${stackName}".`);
+    console.error(`Failed to read stack outputs for "${projectName}".`);
     console.error(msg.trim());
     process.exit(1);
   }
@@ -85,8 +82,7 @@ function main() {
   const outputs = parsed?.Stacks?.[0]?.Outputs ?? [];
   const lines = [
     `# Generated from CloudFormation stack outputs`,
-    `# stack=${stackName}`,
-    `# stage=${stage}`,
+    `# projectName=${projectName}`,
     `# generatedAt=${new Date().toISOString()}`,
     "",
     ...outputs.map((o) => toDotenvLine(o.OutputKey, o.OutputValue)),
