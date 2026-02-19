@@ -2,12 +2,12 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: 'Foundation Infrastructure for Agentic workloads'
 
 Parameters:
-  ProjectName:
+  StackName:
     Type: String
     Default: agentic-web-foundation
-    Description: Lowercase project identifier used in resource names and tags
+    Description: Lowercase stack identifier used in resource names and tags
     AllowedPattern: '^[a-z0-9-]+$'
-    ConstraintDescription: ProjectName must be lowercase letters, numbers, and dashes only
+    ConstraintDescription: StackName must be lowercase letters, numbers, and dashes only
 
   VpcCidr:
     Type: String
@@ -54,7 +54,7 @@ Resources:
       # Bucket names must be globally unique. CloudFormation doesn't have a random()
       # intrinsic, so we derive a stable unique suffix from this stack's ID.
       BucketName: !Sub
-        - '${ProjectName}-${Suffix}-deploy'
+        - '${StackName}-${Suffix}-deploy'
         - Suffix: !Select
             - 0
             - !Split
@@ -86,8 +86,8 @@ Resources:
             NoncurrentVersionExpiration:
               NoncurrentDays: 30
       Tags:
-        - Key: Project
-          Value: !Ref ProjectName
+        - Key: StackName
+          Value: !Ref StackName
 
   DeploymentBucketDelete:
     Type: AWS::S3::Bucket
@@ -98,7 +98,7 @@ Resources:
       # Bucket names must be globally unique. CloudFormation doesn't have a random()
       # intrinsic, so we derive a stable unique suffix from this stack's ID.
       BucketName: !Sub
-        - '${ProjectName}-${Suffix}-deploy'
+        - '${StackName}-${Suffix}-deploy'
         - Suffix: !Select
             - 0
             - !Split
@@ -130,8 +130,8 @@ Resources:
             NoncurrentVersionExpiration:
               NoncurrentDays: 30
       Tags:
-        - Key: Project
-          Value: !Ref ProjectName
+        - Key: StackName
+          Value: !Ref StackName
 
   DeploymentBucketPolicyRetain:
     Type: AWS::S3::BucketPolicy
@@ -186,7 +186,7 @@ Resources:
     Condition: DeleteDeploymentBucket
     Properties:
       FunctionName: !Sub
-        - '${ProjectName}-${Suffix}-empty-bucket'
+        - '${StackName}-${Suffix}-empty-bucket'
         - Suffix: !Select
             - 0
             - !Split
@@ -273,7 +273,7 @@ Resources:
     Condition: DeleteDeploymentBucket
     Properties:
       LogGroupName: !Sub
-        - '/aws/lambda/${ProjectName}-${Suffix}-empty-bucket'
+        - '/aws/lambda/${StackName}-${Suffix}-empty-bucket'
         - Suffix: !Select
             - 0
             - !Split
@@ -291,7 +291,7 @@ Resources:
     Condition: DeleteDeploymentBucket
     Properties:
       RoleName: !Sub
-        - '${ProjectName}-${Suffix}-empty-bucket-role'
+        - '${StackName}-${Suffix}-empty-bucket-role'
         - Suffix: !Select
             - 0
             - !Split
@@ -336,18 +336,18 @@ Resources:
       EnableDnsSupport: true
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-vpc'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-vpc'
+        - Key: StackName
+          Value: !Ref StackName
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-igw'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-igw'
+        - Key: StackName
+          Value: !Ref StackName
 
 
   AttachGateway:
@@ -362,9 +362,9 @@ Resources:
       VpcId: !Ref FoundationVpc
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-public-rt'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-public-rt'
+        - Key: StackName
+          Value: !Ref StackName
 
   DefaultRoute:
     Type: AWS::EC2::Route
@@ -383,9 +383,9 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-public-subnet-1'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-public-subnet-1'
+        - Key: StackName
+          Value: !Ref StackName
 
   PublicSubnet2:
     Type: AWS::EC2::Subnet
@@ -396,9 +396,9 @@ Resources:
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-public-subnet-2'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-public-subnet-2'
+        - Key: StackName
+          Value: !Ref StackName
 
 
   Subnet1RouteTableAssociation:
@@ -422,9 +422,9 @@ Resources:
       MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-private-subnet-1'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-private-subnet-1'
+        - Key: StackName
+          Value: !Ref StackName
 
 
   PrivateSubnet2:
@@ -436,9 +436,9 @@ Resources:
       MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-private-subnet-2'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-private-subnet-2'
+        - Key: StackName
+          Value: !Ref StackName
 
 
   PrivateRouteTable:
@@ -447,9 +447,9 @@ Resources:
       VpcId: !Ref FoundationVpc
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-private-rt'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-private-rt'
+        - Key: StackName
+          Value: !Ref StackName
 
 
   PrivateSubnet1RouteTableAssociation:
@@ -470,9 +470,9 @@ Resources:
         - !If [UseMultiNat, !Ref PrivateRouteTable2, !Ref AWS::NoValue]
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-s3-vpce'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-s3-vpce'
+        - Key: StackName
+          Value: !Ref StackName
 
 
   # -----------------------------
@@ -485,9 +485,9 @@ Resources:
       Domain: vpc
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-natgw-eip'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-natgw-eip'
+        - Key: StackName
+          Value: !Ref StackName
 
   NatGateway:
     Type: AWS::EC2::NatGateway
@@ -496,9 +496,9 @@ Resources:
       SubnetId: !Ref PublicSubnet1
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-natgw'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-natgw'
+        - Key: StackName
+          Value: !Ref StackName
 
   NatGatewayEIP2:
     Type: AWS::EC2::EIP
@@ -508,9 +508,9 @@ Resources:
       Domain: vpc
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-natgw2-eip'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-natgw2-eip'
+        - Key: StackName
+          Value: !Ref StackName
 
   NatGateway2:
     Type: AWS::EC2::NatGateway
@@ -520,9 +520,9 @@ Resources:
       SubnetId: !Ref PublicSubnet2
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-natgw2'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-natgw2'
+        - Key: StackName
+          Value: !Ref StackName
 
 
   PrivateRouteToNatGateway:
@@ -539,9 +539,9 @@ Resources:
       VpcId: !Ref FoundationVpc
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-private-rt-2'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-private-rt-2'
+        - Key: StackName
+          Value: !Ref StackName
 
   PrivateSubnet2RouteTableAssociationSingle:
     Type: AWS::EC2::SubnetRouteTableAssociation
@@ -577,9 +577,9 @@ Resources:
       VpcId: !Ref FoundationVpc
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-valkey-client-sg'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-valkey-client-sg'
+        - Key: StackName
+          Value: !Ref StackName
 
   ValkeySecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -594,16 +594,16 @@ Resources:
           Description: Allow Redis/Valkey access only from services SG
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-valkey-sg'
-        - Key: Project
-          Value: !Ref ProjectName
+          Value: !Sub '${StackName}-valkey-sg'
+        - Key: StackName
+          Value: !Ref StackName
 
 
   ValkeyAdminPassword:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Sub
-        - '${ProjectName}-${Suffix}-valkey-admin-password'
+        - '${StackName}-${Suffix}-valkey-admin-password'
         - Suffix: !Select
             - 0
             - !Split
@@ -621,14 +621,14 @@ Resources:
         # Exclude: double-quote, @, /, and backslash
         ExcludeCharacters: "\"@/\\"
       Tags:
-        - Key: Project
-          Value: !Ref ProjectName
+        - Key: StackName
+          Value: !Ref StackName
 
   ValkeyClientPassword:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Sub
-        - '${ProjectName}-${Suffix}-valkey-client-password'
+        - '${StackName}-${Suffix}-valkey-client-password'
         - Suffix: !Select
             - 0
             - !Split
@@ -646,8 +646,8 @@ Resources:
         # Exclude: double-quote, @, /, and backslash
         ExcludeCharacters: "\"@/\\"
       Tags:
-        - Key: Project
-          Value: !Ref ProjectName
+        - Key: StackName
+          Value: !Ref StackName
 
   ValkeyAdminUser:
     Type: AWS::ElastiCache::User
@@ -714,7 +714,7 @@ Resources:
     Type: AWS::ElastiCache::ServerlessCache
     Properties:
       ServerlessCacheName: !Sub
-        - '${ProjectName}-${Suffix}-valkey'
+        - '${StackName}-${Suffix}-valkey'
         - Suffix: !Select
             - 0
             - !Split
@@ -733,13 +733,13 @@ Resources:
         - !Ref ValkeySecurityGroup
       Description: Serverless Valkey cache for agentic foundation
       Tags:
-        - Key: Project
-          Value: !Ref ProjectName
+        - Key: StackName
+          Value: !Ref StackName
 
 Outputs:
-  ProjectName:
-    Description: Project name
-    Value: !Ref ProjectName
+  StackName:
+    Description: Stack name (also used for resource naming)
+    Value: !Ref StackName
 
   #===== SharedDeployment Bucket =====
   DeploymentBucketName:

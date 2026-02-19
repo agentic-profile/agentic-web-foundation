@@ -18,9 +18,9 @@
     "test": "echo \"Error: no test specified\" && exit 1",
 
     "cloud:up": "bash scripts/cloud-up.sh",
-    "cloud:down": "set -a; . ./cloud.env; set +a; : \"${ProjectName:?Set ProjectName in cloud.env}\"; aws cloudformation delete-stack --stack-name \"$ProjectName\"",
-    "status": "set -a; . ./cloud.env; set +a; : \"${ProjectName:?Set ProjectName in cloud.env}\"; aws cloudformation describe-stacks --stack-name \"$ProjectName\" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo 'STACK_DELETED'",
-    "events": "set -a; . ./cloud.env; set +a; : \"${ProjectName:?Set ProjectName in cloud.env}\"; aws cloudformation describe-stack-events --stack-name \"$ProjectName\" --query 'StackEvents[0:5]' --output table",
+    "cloud:down": "set -a; . ./cloud.env; set +a; : \"${StackName:?Set StackName in cloud.env}\"; aws cloudformation delete-stack --stack-name \"$StackName\"",
+    "status": "set -a; . ./cloud.env; set +a; : \"${StackName:?Set StackName in cloud.env}\"; aws cloudformation describe-stacks --stack-name \"$StackName\" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo 'STACK_DELETED'",
+    "events": "set -a; . ./cloud.env; set +a; : \"${StackName:?Set StackName in cloud.env}\"; aws cloudformation describe-stack-events --stack-name \"$StackName\" --query 'StackEvents[0:5]' --output table",
     "results": "node scripts/write-formation-results.js --out=foundation-results.env"
   }
 }

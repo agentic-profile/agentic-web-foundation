@@ -7,7 +7,7 @@
  *   node scripts/write-formation-results.js --stage=staging --out=formation-results.env
  *   node scripts/write-formation-results.js --stage=prod --out=formation-results.env
  *
- * Reads ProjectName from ./cloud.env (same convention as existing npm scripts).
+ * Reads StackName from ./cloud.env (same convention as existing npm scripts).
  */
 
 const fs = require("fs");
@@ -51,9 +51,9 @@ function main() {
   const repoRoot = path.resolve(__dirname, "..");
   loadEnvFile(path.join(repoRoot, "cloud.env"));
 
-  const projectName = process.env.ProjectName;
-  if (!projectName) {
-    console.error('Missing ProjectName. Set it in "cloud.env" (or env).');
+  const stackName = process.env.StackName;
+  if (!stackName) {
+    console.error('Missing StackName. Set it in "cloud.env" (or env).');
     process.exit(1);
   }
 
@@ -65,7 +65,7 @@ function main() {
         "cloudformation",
         "describe-stacks",
         "--stack-name",
-        projectName,
+        stackName,
         "--output",
         "json",
       ],
@@ -74,7 +74,7 @@ function main() {
     parsed = JSON.parse(stdout);
   } catch (err) {
     const msg = err && err.stderr ? String(err.stderr) : String(err);
-    console.error(`Failed to read stack outputs for "${projectName}".`);
+    console.error(`Failed to read stack outputs for "${stackName}".`);
     console.error(msg.trim());
     process.exit(1);
   }
@@ -82,7 +82,7 @@ function main() {
   const outputs = parsed?.Stacks?.[0]?.Outputs ?? [];
   const lines = [
     `# Generated from CloudFormation stack outputs`,
-    `# projectName=${projectName}`,
+    `# stackName=${stackName}`,
     `# generatedAt=${new Date().toISOString()}`,
     "",
     ...outputs.map((o) => toDotenvLine(o.OutputKey, o.OutputValue)),

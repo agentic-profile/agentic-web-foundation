@@ -20,10 +20,7 @@ This repo provides a single CloudFormation template (`cloud-formation.yaml`) plu
 2. Create a `cloud.env` file.
 
 ```bash
-# NOTE: the npm scripts currently validate `ProjectName` but actually use `PROJECT_NAME`.
-# To avoid surprises, set both to the same value.
-PROJECT_NAME=agentic-web-foundation
-ProjectName=agentic-web-foundation
+StackName=agentic-web-foundation
 ```
 
 3. Deploy the stack:
@@ -46,13 +43,13 @@ npm run results
 These are the scripts defined in `package.json`:
 
 - **Deploy**
-  - **`npm run cloud:up`**: deploy CloudFormation stack named `${PROJECT_NAME}` using `cloud-formation.yaml`
+  - **`npm run cloud:up`**: deploy CloudFormation stack named `${StackName}` using `cloud-formation.yaml`
 - **Delete**
-  - **`npm run cloud:down`**: delete CloudFormation stack named `${PROJECT_NAME}`
+  - **`npm run cloud:down`**: delete CloudFormation stack named `${StackName}`
 - **Status**
-  - **`npm run status`**: print stack status for `${PROJECT_NAME}` (or `STACK_DELETED`)
+  - **`npm run status`**: print stack status for `${StackName}` (or `STACK_DELETED`)
 - **Recent events**
-  - **`npm run events`**: show 5 most recent stack events for `${PROJECT_NAME}`
+  - **`npm run events`**: show 5 most recent stack events for `${StackName}`
 - **Write outputs to env file**
   - **`npm run results`**: write CloudFormation Outputs to `foundation-results.env`
 
@@ -63,7 +60,7 @@ These are the scripts defined in `package.json`:
 
 If you’re calling CloudFormation directly (or editing the npm scripts), these are the main knobs:
 
-- **`ProjectName`**: lower-case identifier used in names/tags
+- **`StackName`**: lower-case identifier used in names/tags and used as the CloudFormation stack name
 - The deployment bucket is always emptied during stack deletion so it can be deleted cleanly
 
 The outputs writer also supports a stage concept (it defaults to `staging` when run directly):
@@ -77,7 +74,7 @@ Example (staging):
 ```bash
 aws cloudformation deploy \
   --template-file cloud-formation.yaml \
-  --stack-name myproject-staging \
-  --parameter-overrides ProjectName=myproject Stage=staging \
+  --stack-name myproject \
+  --parameter-overrides StackName=myproject \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
 ```

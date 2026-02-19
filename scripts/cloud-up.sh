@@ -6,16 +6,16 @@ set -a
 . ../cloud.env
 set +a
 
-: "${ProjectName:?Set ProjectName in cloud.env}"
+: "${StackName:?Set StackName in cloud.env}"
 : "${NatGatewayMode:=single}"
 : "${DeploymentBucketRemovalPolicy:=delete}"
 : "${EmptyBucketLogRetentionDays:=14}"
 
 aws cloudformation deploy \
   --template-file ../cloud-formation.yaml \
-  --stack-name "${ProjectName}" \
+  --stack-name "${StackName}" \
   --parameter-overrides \
-    ProjectName="${ProjectName}" \
+    StackName="${StackName}" \
     NatGatewayMode="${NatGatewayMode}" \
     DeploymentBucketRemovalPolicy="${DeploymentBucketRemovalPolicy}" \
     EmptyBucketLogRetentionDays="${EmptyBucketLogRetentionDays}" \
