@@ -20,3 +20,6 @@ aws cloudformation deploy \
     DeploymentBucketRemovalPolicy="${DeploymentBucketRemovalPolicy}" \
     EmptyBucketLogRetentionDays="${EmptyBucketLogRetentionDays}" \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+
+# Record results to .aws-stacks folder
+npm run results

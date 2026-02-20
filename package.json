@@ -21,6 +21,6 @@
     "cloud:down": "set -a; . ./cloud.env; set +a; : \"${StackName:?Set StackName in cloud.env}\"; aws cloudformation delete-stack --stack-name \"$StackName\"",
     "status": "set -a; . ./cloud.env; set +a; : \"${StackName:?Set StackName in cloud.env}\"; aws cloudformation describe-stacks --stack-name \"$StackName\" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo 'STACK_DELETED'",
     "events": "set -a; . ./cloud.env; set +a; : \"${StackName:?Set StackName in cloud.env}\"; aws cloudformation describe-stack-events --stack-name \"$StackName\" --query 'StackEvents[0:5]' --output table",
-    "results": "node scripts/write-formation-results.js --out=foundation-results.env"
+    "results": "node scripts/write-formation-results.js --out=$HOME/.aws-stacks/foundation-results.env"
   }
 }
