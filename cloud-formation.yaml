@@ -725,6 +725,10 @@ Resources:
                   - '/'
                   - !Ref AWS::StackId
       Engine: valkey
+      CacheUsageLimits:
+        DataStorage:
+          Maximum: 1
+          Unit: GB
       UserGroupId: !Ref ValkeyUserGroup
       SubnetIds:
         - !Ref PrivateSubnet1
